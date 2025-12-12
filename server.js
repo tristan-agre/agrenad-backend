@@ -1,7 +1,4 @@
-// ------------------------------
 // server.js
-// ------------------------------
-
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -10,111 +7,148 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Fichier où on stocke toutes les commandes
+// Fichiers de stockage
 const DATA_FILE = path.join(__dirname, "commandes.json");
+const VALIDATED_FILE = path.join(__dirname, "validated.json");
 
 app.use(cors());
 app.use(express.json());
 
-// ------------------------------
-// Chargement / Sauvegarde JSON
-// ------------------------------
-
-function loadData() {
+// ---------- Helpers ----------
+function loadJSON(filePath, fallback) {
   try {
-    const raw = fs.readFileSync(DATA_FILE, "utf8");
-    const data = JSON.parse(raw);
-    return {
-      petitdej: data.petitdej || { donnees: {}, updatedAt: null },
-      bar: data.bar || { donnees: {}, updatedAt: null },
-      entretien: data.entretien || { donnees: {}, updatedAt: null }
-    };
-  } catch (err) {
-    // Si le fichier n'existe pas ou erreur -> structure vide
-    return {
-      petitdej: { donnees: {}, updatedAt: null },
-      bar: { donnees: {}, updatedAt: null },
-      entretien: { donnees: {}, updatedAt: null }
-    };
+    if (!fs.existsSync(filePath)) return fallback;
+    const raw = fs.readFileSync(filePath, "utf8");
+    if (!raw.trim()) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
   }
 }
 
-function saveData(data) {
-  fs.writeFileSync(
-    DATA_FILE,
-    JSON.stringify(data, null, 2),
-    "utf8"
-  );
+function saveJSON(filePath, data) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
 }
 
-// ------------------------------
-// ROUTES API
-// ------------------------------
+function loadData() {
+  const fallback = { petitdej: null, bar: null, entretien: null };
+  const data = loadJSON(DATA_FILE, fallback);
+  return {
+    petitdej: data.petitdej || null,
+    bar: data.bar || null,
+    entretien: data.entretien || null,
+  };
+}
 
-// Obtenir toutes les commandes
+function saveData(data) {
+  saveJSON(DATA_FILE, data);
+}
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function normalizeService(service) {
+  const ok = ["petitdej", "bar", "entretien"];
+  return ok.includes(service) ? service : null;
+}
+
+// ---------- Routes ----------
+app.get("/", (req, res) => {
+  res.json({ ok: true, message: "Backend AGRENAD OK" });
+});
+
+// Récap global
 app.get("/api/commandes", (req, res) => {
   const data = loadData();
   res.json(data);
 });
 
-// Obtenir la commande d'un service
+// Récupérer commande d'un service
 app.get("/api/commandes/:service", (req, res) => {
-  const service = req.params.service;
-
-  if (!["petitdej", "bar", "entretien"].includes(service)) {
-    return res.status(400).json({ error: "Service inconnu" });
-  }
-
+  const service = normalizeService(req.params.service);
+  if (!service) return res.status(400).json({ error: "Service inconnu" });
   const data = loadData();
-  res.json(data[service]);
+  res.json(data[service] || null);
 });
 
-// Enregistrer une commande (écraser/remplacer)
+// Enregistrer / mettre à jour la commande d'un service (utilisé par tes pages de saisie)
 app.post("/api/commandes/:service", (req, res) => {
-  const service = req.params.service;
+  const service = normalizeService(req.params.service);
+  if (!service) return res.status(400).json({ error: "Service inconnu" });
 
-  if (!["petitdej", "bar", "entretien"].includes(service)) {
-    return res.status(400).json({ error: "Service inconnu" });
-  }
-
-  const data = loadData();
-
-  // On stocke les données envoyées
-  data[service] = {
-    donnees: req.body || {},
-    updatedAt: new Date().toISOString()
+  const body = req.body || {};
+  // On stocke exactement au format que tu utilises déjà: { donnees: {donnees:{...}}, updatedAt }
+  const record = {
+    donnees: body.donnees ?? body, // tolérant
+    updatedAt: nowISO(),
   };
 
+  const data = loadData();
+  data[service] = record;
   saveData(data);
-  res.json({ message: `Commande '${service}' enregistrée.` });
+
+  res.json({ ok: true, service, updatedAt: record.updatedAt });
 });
 
-// ------------------------------
-// Réinitialiser un service
-// ------------------------------
+// ✅ NOUVEAU : modification fine depuis recap (PUT = remplace les donnees du service)
+app.put("/api/commandes/:service", (req, res) => {
+  const service = normalizeService(req.params.service);
+  if (!service) return res.status(400).json({ error: "Service inconnu" });
+
+  const payload = req.body || {};
+  // attendu: { donnees: {...} } ou directement {...}
+  const newDonnees = payload.donnees ?? payload;
+
+  const record = {
+    donnees: newDonnees,
+    updatedAt: nowISO(),
+  };
+
+  const data = loadData();
+  data[service] = record;
+  saveData(data);
+
+  res.json({ ok: true, service, updatedAt: record.updatedAt });
+});
+
+// Reset d'un service
 app.post("/api/reset/:service", (req, res) => {
-  const service = req.params.service;
-
-  if (!["petitdej", "bar", "entretien"].includes(service)) {
-    return res.status(400).json({ error: "Service inconnu" });
-  }
+  const service = normalizeService(req.params.service);
+  if (!service) return res.status(400).json({ error: "Service inconnu" });
 
   const data = loadData();
-
-  data[service] = {
-    donnees: {},
-    updatedAt: null
-  };
-
+  data[service] = null;
   saveData(data);
 
-  res.json({ message: `Service '${service}' réinitialisé.` });
+  res.json({ ok: true, service, reset: true });
 });
 
-// ------------------------------
-// LANCEMENT
-// ------------------------------
+// ✅ NOUVEAU : VALIDATION (snapshot figé pour les courses)
+app.post("/api/validate", (req, res) => {
+  const data = loadData();
+  const snapshot = {
+    validatedAt: nowISO(),
+    commandes: data,
+  };
+  saveJSON(VALIDATED_FILE, snapshot);
+  res.json({ ok: true, validatedAt: snapshot.validatedAt });
+});
+
+// ✅ NOUVEAU : récupérer le snapshot validé (lu par courses.html)
+app.get("/api/validated", (req, res) => {
+  const fallback = { validatedAt: null, commandes: { petitdej: null, bar: null, entretien: null } };
+  const snap = loadJSON(VALIDATED_FILE, fallback);
+  res.json(snap);
+});
+
+// ✅ NOUVEAU : reset snapshot validé (optionnel)
+app.post("/api/validated/reset", (req, res) => {
+  const fallback = { validatedAt: null, commandes: { petitdej: null, bar: null, entretien: null } };
+  saveJSON(VALIDATED_FILE, fallback);
+  res.json({ ok: true, resetValidated: true });
+});
 
 app.listen(PORT, () => {
-  console.log(`Backend AGRENAD disponible sur le port ${PORT}`);
+  console.log(`Backend AGRENAD dispo sur le port ${PORT}`);
 });
