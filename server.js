@@ -85,7 +85,13 @@ function requireAuth(roles = []) {
     }
   };
 }
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 
+app.options("*", cors())
 // ---------- Health ----------
 app.get("/api/hello", (req, res) => {
   res.json({ ok: true, msg: "API OK", at: nowISO() });
