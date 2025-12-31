@@ -278,7 +278,23 @@ app.get("/api/validated", (req, res) => {
   const snap = readJsonSafe(VALIDATED_FILE, { validatedAt: null, commandes: null });
   res.json(snap);
 });
+app.post("/api/commandes/:service", (req, res) => {
+  const service = req.params.service;
+  const data = loadData();
 
+  if (!["petitdej", "bar", "entretien"].includes(service)) {
+    return res.status(400).json({ error: "Service inconnu" });
+  }
+
+  data[service] = {
+    donnees: req.body,
+    updatedAt: new Date().toISOString()
+  };
+
+  saveData(data);
+
+  res.json({ success: true });
+});
 // =====================================================
 app.listen(PORT, () => {
   console.log(`Backend dispo sur http://localhost:${PORT}`);
