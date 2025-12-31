@@ -1,154 +1,279 @@
-// server.js
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Fichiers de stockage
-const DATA_FILE = path.join(__dirname, "commandes.json");
-const VALIDATED_FILE = path.join(__dirname, "validated.json");
-
 app.use(cors());
 app.use(express.json());
 
-// ---------- Helpers ----------
-function loadJSON(filePath, fallback) {
+const PORT = process.env.PORT || 3000;
+
+// === ENV VARS (Render) ===
+const SETUP_SECRET = process.env.SETUP_SECRET || "";
+const JWT_SECRET = process.env.JWT_SECRET || "dev_jwt_change_me";
+
+// === FILES ===
+const DATA_DIR = __dirname;
+const COMMANDES_FILE = path.join(DATA_DIR, "commandes.json");
+const VALIDATED_FILE = path.join(DATA_DIR, "validated.json");
+const PINS_FILE = path.join(DATA_DIR, "pins.json");
+const AUDIT_FILE = path.join(DATA_DIR, "audit.json");
+
+// Services actuels (tu gardes ton fonctionnement)
+const SERVICES = ["petitdej", "bar", "entretien"];
+
+// ---------- Utils JSON ----------
+function readJsonSafe(file, fallback) {
   try {
-    if (!fs.existsSync(filePath)) return fallback;
-    const raw = fs.readFileSync(filePath, "utf8");
-    if (!raw.trim()) return fallback;
-    return JSON.parse(raw);
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
   } catch {
     return fallback;
   }
 }
-
-function saveJSON(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+function writeJson(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf-8");
 }
-
-function loadData() {
-  const fallback = { petitdej: null, bar: null, entretien: null };
-  const data = loadJSON(DATA_FILE, fallback);
-  return {
-    petitdej: data.petitdej || null,
-    bar: data.bar || null,
-    entretien: data.entretien || null,
-  };
-}
-
-function saveData(data) {
-  saveJSON(DATA_FILE, data);
-}
-
 function nowISO() {
   return new Date().toISOString();
 }
-
-function normalizeService(service) {
-  const ok = ["petitdej", "bar", "entretien"];
-  return ok.includes(service) ? service : null;
+function audit(event, meta = {}) {
+  const logs = readJsonSafe(AUDIT_FILE, []);
+  logs.push({ at: nowISO(), event, ...meta });
+  writeJson(AUDIT_FILE, logs);
 }
 
-// ---------- Routes ----------
-app.get("/", (req, res) => {
-  res.json({ ok: true, message: "Backend AGRENAD OK" });
+// ---------- Data init ----------
+function ensureFiles() {
+  const commandesDefault = {};
+  for (const s of SERVICES) {
+    commandesDefault[s] = { donnees: { donnees: {} }, updatedAt: null };
+  }
+  if (!fs.existsSync(COMMANDES_FILE)) writeJson(COMMANDES_FILE, commandesDefault);
+  if (!fs.existsSync(VALIDATED_FILE)) writeJson(VALIDATED_FILE, { validatedAt: null, commandes: null });
+  if (!fs.existsSync(PINS_FILE)) writeJson(PINS_FILE, { owner: null, chef: null });
+  if (!fs.existsSync(AUDIT_FILE)) writeJson(AUDIT_FILE, []);
+}
+ensureFiles();
+
+// ---------- PIN storage ----------
+function loadPins() {
+  return readJsonSafe(PINS_FILE, { owner: null, chef: null });
+}
+function savePins(pins) {
+  writeJson(PINS_FILE, pins);
+}
+
+// ---------- Auth ----------
+function requireAuth(roles = []) {
+  return (req, res, next) => {
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Non authentifié" });
+
+    try {
+      const payload = jwt.verify(token, JWT_SECRET);
+      if (roles.length && !roles.includes(payload.role)) {
+        return res.status(403).json({ error: "Accès refusé" });
+      }
+      req.user = payload;
+      next();
+    } catch {
+      return res.status(401).json({ error: "Token invalide" });
+    }
+  };
+}
+
+// ---------- Health ----------
+app.get("/api/hello", (req, res) => {
+  res.json({ ok: true, msg: "API OK", at: nowISO() });
 });
 
-// Récap global
+// =====================================================
+// PIN API (2 PIN max, login sans choix de rôle)
+// =====================================================
+
+// Statut : est-ce que les 2 PIN existent ?
+app.get("/api/pin/status", (req, res) => {
+  const pins = loadPins();
+  res.json({
+    ownerExists: !!pins.owner,
+    chefExists: !!pins.chef,
+    setupLocked: !!pins.owner && !!pins.chef
+  });
+});
+
+// Setup PIN (création) : nécessite SETUP_SECRET
+// body: { setupSecret, role: "owner"|"chef", pin: "1234" }
+app.post("/api/pin/setup", async (req, res) => {
+  const { setupSecret, role, pin } = req.body || {};
+  if (!SETUP_SECRET || setupSecret !== SETUP_SECRET) {
+    return res.status(401).json({ error: "Setup secret invalide" });
+  }
+  if (!["owner", "chef"].includes(role)) {
+    return res.status(400).json({ error: "Role invalide" });
+  }
+  if (!/^\d{4}$/.test(String(pin || ""))) {
+    return res.status(400).json({ error: "PIN invalide (4 chiffres)" });
+  }
+
+  const pins = loadPins();
+  if (pins.owner && pins.chef) {
+    return res.status(403).json({ error: "Setup verrouillé (2 PIN déjà créés)" });
+  }
+  if (pins[role]) {
+    return res.status(409).json({ error: "Ce rôle a déjà un PIN" });
+  }
+
+  const hash = await bcrypt.hash(String(pin), 10);
+  pins[role] = { hash, createdAt: nowISO() };
+  savePins(pins);
+
+  audit("PIN_CREATED", { role, ip: req.ip, ua: req.headers["user-agent"] });
+  res.json({ ok: true });
+});
+
+// Login : tu donnes juste un PIN, le serveur trouve si c’est OWNER ou CHEF.
+// body: { pin: "1234" }
+app.post("/api/pin/login", async (req, res) => {
+  const { pin } = req.body || {};
+  if (!/^\d{4}$/.test(String(pin || ""))) {
+    return res.status(400).json({ error: "PIN invalide (4 chiffres)" });
+  }
+
+  const pins = loadPins();
+  const pinStr = String(pin);
+
+  let roleMatched = null;
+
+  // On teste owner puis chef (ordre volontaire)
+  if (pins.owner?.hash && await bcrypt.compare(pinStr, pins.owner.hash)) roleMatched = "owner";
+  else if (pins.chef?.hash && await bcrypt.compare(pinStr, pins.chef.hash)) roleMatched = "chef";
+
+  if (!roleMatched) {
+    audit("PIN_LOGIN_FAIL", { ip: req.ip, ua: req.headers["user-agent"] });
+    return res.status(401).json({ error: "PIN incorrect" });
+  }
+
+  const token = jwt.sign({ role: roleMatched }, JWT_SECRET, { expiresIn: "12h" });
+  audit("PIN_LOGIN_OK", { role: roleMatched, ip: req.ip, ua: req.headers["user-agent"] });
+
+  // On NE renvoie PAS le rôle au front (tu voulais que ce soit invisible)
+  res.json({ ok: true, token });
+});
+
+// Owner reset le PIN chef (bague d’or)
+// body: { newPin: "5678" }
+app.post("/api/pin/reset-chef", requireAuth(["owner"]), async (req, res) => {
+  const { newPin } = req.body || {};
+  if (!/^\d{4}$/.test(String(newPin || ""))) {
+    return res.status(400).json({ error: "PIN invalide (4 chiffres)" });
+  }
+
+  const pins = loadPins();
+  if (!pins.chef) return res.status(404).json({ error: "PIN chef non créé" });
+
+  pins.chef.hash = await bcrypt.hash(String(newPin), 10);
+  pins.chef.resetAt = nowISO();
+  savePins(pins);
+
+  audit("PIN_CHEF_RESET_BY_OWNER", { ip: req.ip, ua: req.headers["user-agent"] });
+  res.json({ ok: true });
+});
+
+// =====================================================
+// COMMANDES API
+// =====================================================
+
+// Lire toutes les commandes (brouillon)
 app.get("/api/commandes", (req, res) => {
-  const data = loadData();
+  const data = readJsonSafe(COMMANDES_FILE, {});
   res.json(data);
 });
-
-// Récupérer commande d'un service
-app.get("/api/commandes/:service", (req, res) => {
-  const service = normalizeService(req.params.service);
-  if (!service) return res.status(400).json({ error: "Service inconnu" });
-  const data = loadData();
-  res.json(data[service] || null);
-});
-
-// Enregistrer / mettre à jour la commande d'un service (utilisé par tes pages de saisie)
-app.post("/api/commandes/:service", (req, res) => {
-  const service = normalizeService(req.params.service);
-  if (!service) return res.status(400).json({ error: "Service inconnu" });
-
-  const body = req.body || {};
-  // On stocke exactement au format que tu utilises déjà: { donnees: {donnees:{...}}, updatedAt }
-  const record = {
-    donnees: body.donnees ?? body, // tolérant
-    updatedAt: nowISO(),
-  };
-
-  const data = loadData();
-  data[service] = record;
-  saveData(data);
-
-  res.json({ ok: true, service, updatedAt: record.updatedAt });
-});
-
-// ✅ NOUVEAU : modification fine depuis recap (PUT = remplace les donnees du service)
-app.put("/api/commandes/:service", (req, res) => {
-  const service = normalizeService(req.params.service);
-  if (!service) return res.status(400).json({ error: "Service inconnu" });
-
+// Enregistrer commande service (ADMIN) -> réservé chef/owner
+app.put("/api/admin/commandes/:service", requireAuth(["owner", "chef"]), (req, res) => {
+  const service = req.params.service;
   const payload = req.body || {};
-  // attendu: { donnees: {...} } ou directement {...}
-  const newDonnees = payload.donnees ?? payload;
 
-  const record = {
-    donnees: newDonnees,
-    updatedAt: nowISO(),
-  };
+  const data = readJsonSafe(COMMANDES_FILE, {});
+  if (!data[service]) data[service] = { donnees: { donnees: {} }, updatedAt: null };
 
-  const data = loadData();
-  data[service] = record;
-  saveData(data);
+  const incoming = payload?.donnees?.donnees || payload?.donnees || {};
+  const existing = data[service]?.donnees?.donnees || {};
 
-  res.json({ ok: true, service, updatedAt: record.updatedAt });
+  data[service].donnees = { donnees: { ...existing, ...incoming } };
+  data[service].updatedAt = nowISO();
+
+  writeJson(COMMANDES_FILE, data);
+  audit("ADMIN_SAVE_SERVICE", { service, by: req.user.role, ip: req.ip });
+
+  res.json({ ok: true, updatedAt: data[service].updatedAt });
+});
+// Lire une commande service
+app.get("/api/commandes/:service", (req, res) => {
+  const service = req.params.service;
+  const data = readJsonSafe(COMMANDES_FILE, {});
+  res.json(data[service] || { donnees: { donnees: {} }, updatedAt: null });
 });
 
-// Reset d'un service
-app.post("/api/reset/:service", (req, res) => {
-  const service = normalizeService(req.params.service);
-  if (!service) return res.status(400).json({ error: "Service inconnu" });
+// Enregistrer commande service (brouillon)
+// ICI on laisse ouvert (tout le monde peut enregistrer) OU tu peux fermer si tu veux
+// -> toi tu veux que tout le monde puisse commander : donc OPEN.
+app.put("/api/commandes/:service", (req, res) => {
+  const service = req.params.service;
+  const payload = req.body || {};
 
-  const data = loadData();
-  data[service] = null;
-  saveData(data);
+  const data = readJsonSafe(COMMANDES_FILE, {});
+  if (!data[service]) data[service] = { donnees: { donnees: {} }, updatedAt: null };
 
-  res.json({ ok: true, service, reset: true });
+  // merge propre
+  const incoming = payload?.donnees?.donnees || payload?.donnees || {};
+  const existing = data[service]?.donnees?.donnees || {};
+
+  data[service].donnees = { donnees: { ...existing, ...incoming } };
+  data[service].updatedAt = nowISO();
+
+  writeJson(COMMANDES_FILE, data);
+  res.json({ ok: true, updatedAt: data[service].updatedAt });
 });
 
-// ✅ NOUVEAU : VALIDATION (snapshot figé pour les courses)
-app.post("/api/validate", (req, res) => {
-  const data = loadData();
+// Reset service (PROTÉGÉ PIN)
+app.post("/api/reset/:service", requireAuth(["owner", "chef"]), (req, res) => {
+  const service = req.params.service;
+  const data = readJsonSafe(COMMANDES_FILE, {});
+  if (!data[service]) data[service] = { donnees: { donnees: {} }, updatedAt: null };
+
+  data[service].donnees = { donnees: {} };
+  data[service].updatedAt = nowISO();
+
+  writeJson(COMMANDES_FILE, data);
+  audit("RESET_SERVICE", { service, by: req.user.role, ip: req.ip });
+
+  res.json({ ok: true, service });
+});
+
+// Valider (snapshot) (PROTÉGÉ PIN)
+app.post("/api/validate", requireAuth(["owner", "chef"]), (req, res) => {
+  const data = readJsonSafe(COMMANDES_FILE, {});
   const snapshot = {
     validatedAt: nowISO(),
-    commandes: data,
+    commandes: data
   };
-  saveJSON(VALIDATED_FILE, snapshot);
+  writeJson(VALIDATED_FILE, snapshot);
+  audit("VALIDATED", { by: req.user.role, ip: req.ip });
+
   res.json({ ok: true, validatedAt: snapshot.validatedAt });
 });
 
-// ✅ NOUVEAU : récupérer le snapshot validé (lu par courses.html)
+// Lire le snapshot validé (courses)
 app.get("/api/validated", (req, res) => {
-  const fallback = { validatedAt: null, commandes: { petitdej: null, bar: null, entretien: null } };
-  const snap = loadJSON(VALIDATED_FILE, fallback);
+  const snap = readJsonSafe(VALIDATED_FILE, { validatedAt: null, commandes: null });
   res.json(snap);
 });
 
-// ✅ NOUVEAU : reset snapshot validé (optionnel)
-app.post("/api/validated/reset", (req, res) => {
-  const fallback = { validatedAt: null, commandes: { petitdej: null, bar: null, entretien: null } };
-  saveJSON(VALIDATED_FILE, fallback);
-  res.json({ ok: true, resetValidated: true });
-});
-
+// =====================================================
 app.listen(PORT, () => {
-  console.log(`Backend AGRENAD dispo sur le port ${PORT}`);
+  console.log(`Backend dispo sur http://localhost:${PORT}`);
 });
