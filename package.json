@@ -1,18 +1,18 @@
 {
   "name": "agrenad-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Backend commandes avec validation et PIN cuisine",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "",
+  "license": "MIT",
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.3"
   }
 }
