@@ -194,23 +194,6 @@ function requireKitchenAuth(req, res, next) {
     return next();
   }
 
-  // 2) Cookie (ancien mode)
-  const sess = getSession(data, req);
-  if (!sess) return res.status(401).json({ error: "UNAUTHORIZED" });
-
-  data.sessions[sess.token].expiresAt = Date.now() + SESSION_TTL_MS;
-  saveData(data);
-  next();
-}
-
-  const sess = data.sessions?.[token];
-  if (!sess || sess.expiresAt <= Date.now()) return res.status(401).json({ error: "UNAUTHORIZED" });
-
-  // refresh TTL
-  data.sessions[token].expiresAt = Date.now() + SESSION_TTL_MS;
-  saveData(data);
-  next();
-
 
 
   // refresh TTL
@@ -330,7 +313,7 @@ app.post("/api/reset-all", requireKitchenAuth, (req, res) => {
   data.validated = null;
 
   try {
-    saveData(data);
+    saveData();
     res.json({ success: true, resetAll: true });
   } catch (e) {
     console.error("❌ saveData failed (POST /api/reset-all):", e);
@@ -354,7 +337,7 @@ app.post("/api/validate", requireKitchenAuth, (req, res) => {
   };
 
   try {
-    saveData(data);
+    saveData();
     res.json({ success: true, validatedAt: data.validated.validatedAt });
   } catch (e) {
     console.error("❌ saveData failed (POST /api/validate):", e);
@@ -523,3 +506,4 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`✅ Backend AGRENAD dispo sur http://localhost:${PORT}`);
 });
+}
