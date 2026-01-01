@@ -182,7 +182,7 @@ function getSessionTokenFromReq(req) {
   return cookies[SESSION_COOKIE] || null;
 }
 
-function requireKitchenAuth(req, res, next) {
+function requireKitchenAuth(req, res, next) {}
   const data = loadData();
 
   // 1) Bearer token (front)
@@ -490,11 +490,12 @@ app.get("/api/pin/me", (req, res) => {
   }
 
   const sess = getSession(data, req);
-  return res.json({ authenticated: !!sess });
+  res.json({ authenticated: !!sess });
 });
 
 // ====================== 404 API ======================
-app.use("/api", (req, res) => res.status(404).json({ error: "API_NOT_FOUND" }));
+app.use("/api", (req, res) => { res.status(404).json({ error: "API_NOT_FOUND" });
+});
 
 // ====================== ERROR HANDLER ======================
 app.use((err, req, res, next) => {
@@ -506,4 +507,3 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`✅ Backend AGRENAD dispo sur http://localhost:${PORT}`);
 });
-}
