@@ -186,7 +186,6 @@ function requireKitchenAuth(req, res, next) {}
   const data = loadData();
 
   // 1) Bearer token (front)
-  const bearer = getBearerToken(req);
   if (bearer && data.sessions?.[bearer] && data.sessions[bearer].expiresAt > Date.now()) {
     // refresh TTL
     data.sessions[bearer].expiresAt = Date.now() + SESSION_TTL_MS;
