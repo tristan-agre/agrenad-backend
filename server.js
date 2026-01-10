@@ -7,6 +7,7 @@ const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
 // ====================== CONFIG ======================
@@ -447,21 +448,20 @@ app.post("/api/pin/login", async (req, res) => {
   const token = createSession(data, matchedPinId);
 
   try {
-    saveData(data);
+  saveData(data);
 
-    res.setHeader(
-      "Set-Cookie",
-      `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(
-        SESSION_TTL_MS / 1000
-      )}`
-    );
+  const maxAge = Math.floor(SESSION_TTL_MS / 1000);
 
-    // ✅ On renvoie aussi le token (utile si ton front veut Bearer)
-    res.json({ success: true, loggedIn: true, token });
-  } catch (e) {
-    console.error("❌ saveData failed (POST /api/pin/login):", e);
-    res.status(500).json({ error: "LOGIN_SAVE_FAILED" });
-  }
+  res.setHeader(
+    "Set-Cookie",
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${maxAge}`
+  );
+
+  return res.json({ success: true, loggedIn: true });
+} catch (e) {
+  console.error("❌ saveData failed (POST /api/pin/login):", e);
+  return res.status(500).json({ error: "LOGIN_SAVE_FAILED" });
+}
 });
 
 // Logout
