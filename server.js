@@ -324,7 +324,7 @@ app.post("/api/reset-all", (req, res) => {
 });
 
 // ---------- VALIDATION ----------
-app.post("/api/validate", requireKitchenAuth, (req, res) => {
+app.post("/api/validate", (req, res) => {
   const data = loadData();
   data.validated = {
     commandes: {
