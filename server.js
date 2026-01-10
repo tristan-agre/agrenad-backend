@@ -157,42 +157,17 @@ function createSession(data, pinId) {
 }
 
 function getTokenFromReq(req) {
-  // 1) Authorization: Bearer xxx
-  const auth = req.headers.authorization || "";
-  if (auth.toLowerCase().startsWith("bearer ")) {
-    return auth.slice(7).trim();
-  }
+ 
   // 2) Cookie
   const cookies = parseCookies(req);
   if (cookies[SESSION_COOKIE]) return cookies[SESSION_COOKIE];
 
   return null;
 }
-function getBearerToken(req) {
-  const h = req.headers.authorization || "";
-  const m = h.match(/^Bearer\s+(.+)$/i);
-  return m ? m[1].trim() : "";
-}
-function getSessionTokenFromReq(req) {
-  // 1) Authorization: Bearer xxx
-  const auth = req.headers.authorization || "";
-  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
-
-  // 2) Cookie (fallback)
-  const cookies = parseCookies(req);
-  return cookies[SESSION_COOKIE] || null;
-}
 
 function requireKitchenAuth(req, res, next) {}
   const data = loadData();
 
-  // 1) Bearer token (front)
-  if (bearer && data.sessions?.[bearer] && data.sessions[bearer].expiresAt > Date.now()) {
-    // refresh TTL
-    data.sessions[bearer].expiresAt = Date.now() + SESSION_TTL_MS;
-    saveData(data);
-    return next();
-  }
 
 
 
@@ -483,10 +458,7 @@ app.post("/api/pin/logout", (req, res) => {
 app.get("/api/pin/me", (req, res) => {
   const data = loadData();
 
-  const bearer = getBearerToken(req);
-  if (bearer && data.sessions?.[bearer] && data.sessions[bearer].expiresAt > Date.now()) {
-    return res.json({ authenticated: true });
-  }
+
 
   const sess = getSession(data, req);
   res.json({ authenticated: !!sess });
