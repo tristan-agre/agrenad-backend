@@ -165,18 +165,26 @@ function getTokenFromReq(req) {
   return null;
 }
 
-function requireKitchenAuth(req, res, next) {}
+function requireKitchenAuth(req, res, next) {
   const data = loadData();
 
+  const cookies = parseCookies(req);
+  const token = cookies[SESSION_COOKIE];
+  if (!token) {
+    return res.status(401).json({ error: "UNAUTHORIZED" });
+  }
 
+  const sess = data.sessions?.[token];
+  if (!sess || sess.expiresAt <= Date.now()) {
+    return res.status(401).json({ error: "UNAUTHORIZED" });
+  }
 
-
-  // refresh TTL
-  data.sessions[sess.token].expiresAt = Date.now() + SESSION_TTL_MS;
+  // ✅ refresh TTL ICI (et seulement ici)
+  sess.expiresAt = Date.now() + SESSION_TTL_MS;
   saveData(data);
+
   next();
-
-
+}
 // ====================== ROUTES: HEALTH ======================
 app.get("/", (req, res) => res.send("AGRENAD backend OK"));
 app.get("/api/hello", (req, res) => res.json({ ok: true, message: "hello" }));
