@@ -61,6 +61,16 @@ app.use(
 
 // Petit middleware pratique : répondre OK sur preflight
 app.options("*", cors());
+app.disable("etag");
+app.use((req, res, next) => {
+  if(req.acceptsCharsets.startswith("/api/")) {
+  res.setHeader("Cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-control", "no-store");
+  }
+next();
+});
 
 // =====================================================
 // HELPERS (cookies / https)
@@ -208,6 +218,7 @@ function requireKitchenAuth(req, res, next) {
   refreshSession(data, sess.token);
   saveData(data);
   next();
+  return next();
 }
 
 function setSessionCookie(req, res, token) {
