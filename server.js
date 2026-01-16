@@ -32,7 +32,7 @@ const FRONT_ORIGINS = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
   // Ajoute Netlify si tu l'as :
-  // "https://ton-site.netlify.app",
+   "https://commandeagrenad.netlify.app",
 ];
 
 // =====================================================
