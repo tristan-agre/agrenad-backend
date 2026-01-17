@@ -161,21 +161,31 @@ function sanitizeValue(v) {
   return "";
 }
 
-function normalizeDonnees(obj) {
-  if (!obj || typeof obj !== "object") return {};
+function sanitizeDonnees(obj) {
   const out = {};
-  for (const k of Object.keys(obj)) {
-    out[k] = sanitizeValue(obj[k]);
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === null || value === undefined) continue;
+
+    const v = String(value).trim();
+
+    // On garde tout, y compris "0"
+    out[key] = v;
   }
+
   return out;
 }
 
 function extractDonneesFromBody(reqBody) {
-  // Format attendu : { donnees: {...} }
-  // Tolérance : si l'utilisateur envoie directement {...}
   if (!reqBody || typeof reqBody !== "object") return {};
-  if (reqBody.donnees && typeof reqBody.donnees === "object") return normalizeDonnees(reqBody.donnees);
-  return normalizeDonnees(reqBody);
+
+  // Cas 1 : { donnees: {...} }
+  if (reqBody.donnees && typeof reqBody.donnees === "object") {
+    return sanitizeDonnees(reqBody.donnees);
+  }
+
+  // Cas 2 : { produit: valeur }
+  return sanitizeDonnees(reqBody);
 }
 
 // =====================================================
