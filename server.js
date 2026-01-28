@@ -6,7 +6,6 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const bcrypt = require("bcryptjs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,25 +13,29 @@ const PORT = process.env.PORT || 3000;
 // =====================================================
 // CONFIG
 // =====================================================
-app.set("trust proxy", 1); // IMPORTANT sur Render (req.secure via x-forwarded-proto)
+app.set("trust proxy", 1); // Render / proxy
 
 const DATA_FILE = path.join(__dirname, "commandes.json");
+const SERVICES = ["petitdej", "bar", "entretien"]; // scopes services
+const SCOPES = ["petitdej", "bar", "entretien", "recap", "admin"];
 
-const SERVICES = ["petitdej", "bar", "entretien"];
-const SESSION_COOKIE = "agrenad_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8h
+const SESSION_COOKIE = "agrenad_token";
 
-const SETUP_SECRET = process.env.SETUP_SECRET || "";
-const MAX_PINS = 2;
+// IMPORTANT : mets un sel en env sur Render (et en local) : PIN_SALT
+// sinon fallback (OK en dev, moins bien en prod)
+const PIN_SALT = String(process.env.PIN_SALT || "CHANGE_ME_SALT").trim();
 
-// Si tu utilises Live Server ou localhost :
+// MASTER PIN en env (obligatoire en prod)
+const MASTER_PIN = String(process.env.MASTER_PIN || "9999").trim();
+
+// Front origins autorisés (Netlify + local)
 const FRONT_ORIGINS = [
   "http://localhost:5500",
   "http://127.0.0.1:5500",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  // Ajoute Netlify si tu l'as :
-   "https://commandeagrenad.netlify.app",
+  "https://commandeagrenad.netlify.app",
 ];
 
 // =====================================================
@@ -40,70 +43,25 @@ const FRONT_ORIGINS = [
 // =====================================================
 app.use(express.json({ limit: "1mb" }));
 
-// CORS : avec cookies => PAS de "*"
 app.use(
   cors({
     origin: (origin, cb) => {
-      // origin undefined / null => typiquement file://
-      // On autorise en dev (sinon tu ne peux pas tester depuis file://)
-      if (!origin) return cb(null, true);
-
+      if (!origin) return cb(null, true); // file:// / certains tests
       if (FRONT_ORIGINS.includes(origin)) return cb(null, true);
-
-      // Si tu veux être permissif le temps de dev :
-      // return cb(null, true);
-
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
     credentials: true,
   })
 );
 
-// Petit middleware pratique : répondre OK sur preflight
 app.options("*", cors());
 app.disable("etag");
-app.use((req, res, next) => {
- /* if(req.acceptsCharsets.startsWith("/api/")) {
-  res.setHeader("Cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  res.setHeader("Surrogate-control", "no-store");
-  }*/
-next();
+
+// no-cache API (optionnel mais propre)
+app.use("/api", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
 });
-
-// =====================================================
-// HELPERS (cookies / https)
-// =====================================================
-function parseCookies(req) {
-  const header = req.headers.cookie || "";
-  const out = {};
-  header.split(";").forEach((part) => {
-    const [k, ...v] = part.trim().split("=");
-    if (!k) return;
-    out[k] = decodeURIComponent(v.join("=") || "");
-  });
-  return out;
-}
-
-function isHttpsRequest(req) {
-  // Sur Render : x-forwarded-proto = https
-  const xfProto = (req.headers["x-forwarded-proto"] || "").toString().toLowerCase();
-  if (xfProto.includes("https")) return true;
-  // Sur local https (rare) :
-  if (req.secure) return true;
-  return false;
-}
-
-function getBearerToken(req) {
-  const h = req.headers.authorization || "";
-  const m = /^Bearer\s+(.+)$/i.exec(h);
-  return m ? m[1] : "";
-}
-
-function ensureService(service) {
-  return SERVICES.includes(service);
-}
 
 // =====================================================
 // DATA LAYER
@@ -113,9 +71,12 @@ function defaultData() {
     petitdej: null,
     bar: null,
     entretien: null,
-    validated: null, // snapshot validé
-    pins: {}, // { pinId: { hash, createdAt } }
-    sessions: {}, // { token: { pinId, expiresAt } }
+    validated: null,
+    pins: {
+      // exemple :
+      // bar: { hash: "...", updatedAt: "..." }
+      // recap: { hash: "...", updatedAt: "..." }
+    },
   };
 }
 
@@ -126,14 +87,12 @@ function loadData() {
     if (!raw || raw.trim() === "") return defaultData();
 
     const d = JSON.parse(raw);
-
     return {
       petitdej: d.petitdej ?? null,
       bar: d.bar ?? null,
       entretien: d.entretien ?? null,
       validated: d.validated ?? null,
       pins: d.pins ?? {},
-      sessions: d.sessions ?? {},
     };
   } catch (e) {
     console.error("❌ loadData failed:", e);
@@ -142,107 +101,67 @@ function loadData() {
 }
 
 function saveData(data) {
-  // purge sessions expirées
-  const now = Date.now();
-  if (data.sessions) {
-    for (const token of Object.keys(data.sessions)) {
-      const s = data.sessions[token];
-      if (!s || s.expiresAt <= now) delete data.sessions[token];
-    }
-  }
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
-function sanitizeValue(v) {
-  if (v === null || v === undefined) return "";
-  if (typeof v === "number") return String(v);
-  if (typeof v === "string") return v.trim();
-  if (typeof v === "boolean") return v ? "1" : "0";
-  return "";
+function ensureService(service) {
+  return SERVICES.includes(service);
 }
 
 function sanitizeDonnees(obj) {
   const out = {};
+  if (!obj || typeof obj !== "object") return out;
 
   for (const [key, value] of Object.entries(obj)) {
     if (value === null || value === undefined) continue;
-
     const v = String(value).trim();
-
-    // On garde tout, y compris "0"
+    // on garde tout, y compris "0"
     out[key] = v;
   }
-
   return out;
 }
 
-function extractDonneesFromBody(reqBody) {
-  if (!reqBody || typeof reqBody !== "object") return {};
-
-  // Cas 1 : { donnees: {...} }
-  if (reqBody.donnees && typeof reqBody.donnees === "object") {
-    return sanitizeDonnees(reqBody.donnees);
-  }
-
-  // Cas 2 : { produit: valeur }
-  return sanitizeDonnees(reqBody);
-}
-
 // =====================================================
-// AUTH (sessions cookie + bearer fallback)
+// AUTH - PIN HASH + SESSIONS (mémoire)
 // =====================================================
-function createSession(data, pinId) {
-  const token = crypto.randomBytes(24).toString("hex");
-  data.sessions[token] = { pinId, expiresAt: Date.now() + SESSION_TTL_MS };
-  return token;
+
+// Sessions en mémoire : token -> { scope, expiresAt }
+const sessions = new Map();
+
+function isHttpsRequest(req) {
+  const xfProto = (req.headers["x-forwarded-proto"] || "").toString().toLowerCase();
+  if (xfProto.includes("https")) return true;
+  if (req.secure) return true;
+  return false;
 }
 
-function getSession(data, req) {
-  // 1) Bearer (fallback si cookies bloqués)
-  const bearer = getBearerToken(req);
-  if (bearer && data.sessions?.[bearer] && data.sessions[bearer].expiresAt > Date.now()) {
-    return { token: bearer, ...data.sessions[bearer] };
-  }
-
-  // 2) Cookie
-  const cookies = parseCookies(req);
-  const token = cookies[SESSION_COOKIE];
-  if (!token) return null;
-  const sess = data.sessions?.[token];
-  if (!sess) return null;
-  if (sess.expiresAt <= Date.now()) return null;
-  return { token, ...sess };
+function createToken() {
+  return crypto.randomBytes(24).toString("hex");
 }
 
-function refreshSession(data, token) {
-  if (data.sessions?.[token]) {
-    data.sessions[token].expiresAt = Date.now() + SESSION_TTL_MS;
-  }
+function getBearerToken(req) {
+  const h = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(h);
+  return m ? m[1] : "";
 }
 
-function requireKitchenAuth(req, res, next) {
-  const data = loadData();
-  const sess = getSession(data, req);
-  if (!sess) return res.status(401).json({ error: "UNAUTHORIZED" });
-
-  refreshSession(data, sess.token);
-  saveData(data);
-  next();
-  return next();
+function getCookieToken(req) {
+  const cookie = req.headers.cookie || "";
+  const m = cookie.match(new RegExp(`${SESSION_COOKIE}=([^;]+)`));
+  return m ? decodeURIComponent(m[1]) : "";
 }
 
 function setSessionCookie(req, res, token) {
-  const maxAge = Math.floor(SESSION_TTL_MS / 1000);
   const https = isHttpsRequest(req);
-
-  // En prod cross-site => SameSite=None; Secure obligatoire
-  // En local http => Secure interdit, donc Lax
   const sameSite = https ? "None" : "Lax";
   const securePart = https ? " Secure;" : "";
 
+  // cookie simple, HttpOnly, 8h
   res.setHeader(
     "Set-Cookie",
-    `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=${sameSite};${securePart} Max-Age=${maxAge}`
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=${sameSite};${securePart} Max-Age=${Math.floor(
+      SESSION_TTL_MS / 1000
+    )}`
   );
 }
 
@@ -257,31 +176,132 @@ function clearSessionCookie(req, res) {
   );
 }
 
+function hashPin(pin) {
+  // sha256(pin + salt)
+  return crypto.createHash("sha256").update(`${pin}:${PIN_SALT}`).digest("hex");
+}
+
+function authMiddleware(req, res, next) {
+  const token = getBearerToken(req) || getCookieToken(req);
+  if (!token) return res.status(401).json({ error: "UNAUTHORIZED" });
+
+  const sess = sessions.get(token);
+  if (!sess) return res.status(401).json({ error: "UNAUTHORIZED" });
+
+  if (sess.expiresAt <= Date.now()) {
+    sessions.delete(token);
+    return res.status(401).json({ error: "SESSION_EXPIRED" });
+  }
+
+  // sliding session
+  sess.expiresAt = Date.now() + SESSION_TTL_MS;
+  req.user = { scope: sess.scope, token };
+  next();
+}
+
+function requireScope(...allowed) {
+  return (req, res, next) => {
+    const scope = req.user?.scope;
+    if (!scope) return res.status(401).json({ error: "UNAUTHORIZED" });
+
+    if (scope === "admin") return next();
+    if (!allowed.includes(scope)) return res.status(403).json({ error: "FORBIDDEN", scope, allowed });
+
+    next();
+  };
+}
+
 // =====================================================
 // ROUTES
 // =====================================================
 app.get("/", (req, res) => res.send("AGRENAD backend OK"));
 app.get("/api/hello", (req, res) => res.json({ ok: true, message: "hello" }));
 
-// ---------- COMMANDES ----------
-app.get("/api/commandes", (req, res) => {
+// ---------- AUTH ----------
+app.post("/api/auth/login", (req, res) => {
+  const pin = String(req.body?.pin || "").trim();
+  const wantCookie = Boolean(req.body?.setCookie); // optionnel
+
+  if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: "PIN_INVALID" });
+
+  // MASTER PIN => admin
+  if (pin === MASTER_PIN) {
+    const token = createToken();
+    sessions.set(token, { scope: "admin", expiresAt: Date.now() + SESSION_TTL_MS });
+    if (wantCookie) setSessionCookie(req, res, token);
+    return res.json({ ok: true, token, scope: "admin" });
+  }
+
+  // sinon on check pins persistés
   const data = loadData();
-  res.json({ petitdej: data.petitdej, bar: data.bar, entretien: data.entretien });
+  const pinHash = hashPin(pin);
+
+  let scope = null;
+  for (const s of ["petitdej", "bar", "entretien", "recap"]) {
+    if (data.pins?.[s]?.hash && data.pins[s].hash === pinHash) {
+      scope = s;
+      break;
+    }
+  }
+
+  if (!scope) return res.status(401).json({ error: "BAD_PIN" });
+
+  const token = createToken();
+  sessions.set(token, { scope, expiresAt: Date.now() + SESSION_TTL_MS });
+  if (wantCookie) setSessionCookie(req, res, token);
+
+  res.json({ ok: true, token, scope });
 });
 
-app.get("/api/commandes/:service", (req, res) => {
-  const service = req.params.service;
-  if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
-  const data = loadData();
-  res.json(data[service] || null);
+app.get("/api/auth/me", authMiddleware, (req, res) => {
+  res.json({ authenticated: true, scope: req.user.scope });
 });
 
-// POST + PUT => même handler
-function upsertCommande(req, res) {
-  const service = req.params.service;
-  if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
+app.post("/api/auth/logout", authMiddleware, (req, res) => {
+  sessions.delete(req.user.token);
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+});
 
-  const donnees = extractDonneesFromBody(req.body);
+// ---------- ADMIN PIN MANAGEMENT (MASTER/admin only) ----------
+app.get("/api/admin/pins", authMiddleware, requireScope("admin"), (req, res) => {
+  const data = loadData();
+  // On ne renvoie pas les hash en clair si tu veux, mais ici on peut renvoyer juste timestamps
+  const out = {};
+  for (const s of ["petitdej", "bar", "entretien", "recap"]) {
+    out[s] = data.pins?.[s]?.updatedAt ? { updatedAt: data.pins[s].updatedAt } : null;
+  }
+  res.json({ ok: true, pins: out });
+});
+
+app.post("/api/admin/pins", authMiddleware, requireScope("admin"), (req, res) => {
+  const scope = String(req.body?.scope || "").trim();
+  const pin = String(req.body?.pin || "").trim();
+
+  if (!["petitdej", "bar", "entretien", "recap"].includes(scope)) {
+    return res.status(400).json({ error: "SCOPE_INVALID" });
+  }
+  if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: "PIN_INVALID" });
+
+  const data = loadData();
+  data.pins = data.pins || {};
+  data.pins[scope] = {
+    hash: hashPin(pin),
+    updatedAt: new Date().toISOString(),
+  };
+
+  saveData(data);
+  res.json({ ok: true, scope, updatedAt: data.pins[scope].updatedAt });
+});
+
+// ---------- COMMANDES (routes dédiées par service) ----------
+function getCommande(service) {
+  const data = loadData();
+  return data[service] ?? null;
+}
+
+function setCommande(service, body) {
+  const donnees = sanitizeDonnees(body);
   const data = loadData();
 
   data[service] = {
@@ -289,182 +309,64 @@ function upsertCommande(req, res) {
     updatedAt: new Date().toISOString(),
   };
 
-  try {
-    saveData(data);
-    res.json({ success: true, service, updatedAt: data[service].updatedAt });
-  } catch (e) {
-    console.error("❌ saveData failed (commandes upsert):", e);
-    res.status(500).json({ error: "SAVE_FAILED" });
-  }
+  saveData(data);
+  return { success: true, service, updatedAt: data[service].updatedAt };
 }
 
-app.post("/api/commandes/:service", upsertCommande);
-app.put("/api/commandes/:service", upsertCommande);
+// GET /api/commandes/<service>
+for (const s of SERVICES) {
+  app.get(`/api/commandes/${s}`, authMiddleware, requireScope(s, "recap"), (req, res) => {
+    res.json(getCommande(s));
+  });
 
-app.post("/api/reset/:service", (req, res) => {
-  const service = req.params.service;
-  if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
+  app.post(`/api/commandes/${s}`, authMiddleware, requireScope(s, "recap"), (req, res) => {
+    try {
+      const out = setCommande(s, req.body);
+      res.json(out);
+    } catch (e) {
+      console.error("❌ save commande failed:", e);
+      res.status(500).json({ error: "SAVE_FAILED" });
+    }
+  });
+}
 
+// recap : accès recap + admin
+app.get("/api/commandes/recap", authMiddleware, requireScope("recap"), (req, res) => {
   const data = loadData();
-  data[service] = null;
-
-  try {
-    saveData(data);
-    res.json({ success: true, service, reset: true });
-  } catch (e) {
-    console.error("❌ reset service failed:", e);
-    res.status(500).json({ error: "RESET_FAILED" });
-  }
-});
-
-app.post("/api/reset-all", (req, res) => {
-  const data = loadData();
-  data.petitdej = null;
-  data.bar = null;
-  data.entretien = null;
-  data.validated = null;
-
-  try {
-    saveData(data);
-    res.json({ success: true, resetAll: true });
-  } catch (e) {
-    console.error("❌ reset-all failed:", e);
-    res.status(500).json({ error: "RESET_ALL_FAILED" });
-  }
-});
-
-// ---------- VALIDATION ----------
-app.post("/api/validate", (req, res) => {
-  const data = loadData();
-  data.validated = {
-    commandes: {
-      petitdej: data.petitdej,
-      bar: data.bar,
-      entretien: data.entretien,
-    },
-    validatedAt: new Date().toISOString(),
-  };
-
-  try {
-    saveData(data);
-    res.json({ success: true, validatedAt: data.validated.validatedAt });
-  } catch (e) {
-    console.error("❌ validate failed:", e);
-    res.status(500).json({ error: "VALIDATE_FAILED" });
-  }
-});
-
-app.get("/api/validated", (req, res) => {
-  const data = loadData();
-  res.json(data.validated || null);
-});
-
-app.post("/api/validated/reset", requireKitchenAuth, (req, res) => {
-  const data = loadData();
-  data.validated = null;
-
-  try {
-    saveData(data);
-    res.json({ success: true, resetValidated: true });
-  } catch (e) {
-    console.error("❌ reset validated failed:", e);
-    res.status(500).json({ error: "RESET_VALIDATED_FAILED" });
-  }
-});
-
-// ---------- PIN / AUTH ----------
-app.get("/api/pin/status", (req, res) => {
-  const data = loadData();
-  const count = Object.keys(data.pins || {}).length;
   res.json({
-    pinsCount: count,
-    maxPins: MAX_PINS,
-    setupEnabled: !!SETUP_SECRET,
+    petitdej: data.petitdej,
+    bar: data.bar,
+    entretien: data.entretien,
   });
 });
 
-app.post("/api/pin/setup", async (req, res) => {
-  if (!SETUP_SECRET) return res.status(400).json({ error: "SETUP_SECRET_NOT_CONFIGURED" });
-
-  const { setupSecret, pin } = req.body || {};
-  if (!setupSecret || setupSecret !== SETUP_SECRET) return res.status(401).json({ error: "BAD_SETUP_SECRET" });
-
-  const pinStr = String(pin || "").trim();
-  if (!/^\d{4}$/.test(pinStr)) return res.status(400).json({ error: "PIN_MUST_BE_4_DIGITS" });
-
+// ---------- COMPAT (ancienne route si tu en as encore besoin) ----------
+app.get("/api/commandes", authMiddleware, requireScope("recap"), (req, res) => {
   const data = loadData();
-  const ids = Object.keys(data.pins || {});
-  if (ids.length >= MAX_PINS) return res.status(400).json({ error: "MAX_PINS_REACHED" });
+  res.json({
+    petitdej: data.petitdej,
+    bar: data.bar,
+    entretien: data.entretien,
+  });
+});
 
-  // empêche doublon
-  for (const id of ids) {
-    const ok = await bcrypt.compare(pinStr, data.pins[id].hash);
-    if (ok) return res.status(400).json({ error: "PIN_ALREADY_EXISTS" });
+app.post("/api/commandes/:service", authMiddleware, (req, res) => {
+  const service = req.params.service;
+  if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
+
+  // scope service ou recap/admin
+  const scope = req.user?.scope;
+  if (scope !== "admin" && scope !== "recap" && scope !== service) {
+    return res.status(403).json({ error: "FORBIDDEN" });
   }
-
-  const pinId = crypto.randomBytes(8).toString("hex");
-  const hash = await bcrypt.hash(pinStr, 10);
-  data.pins[pinId] = { hash, createdAt: new Date().toISOString() };
 
   try {
-    saveData(data);
-    res.json({ success: true, pinCreated: true, pinsCount: Object.keys(data.pins).length });
+    const out = setCommande(service, req.body);
+    res.json(out);
   } catch (e) {
-    console.error("❌ pin setup save failed:", e);
-    res.status(500).json({ error: "PIN_SETUP_SAVE_FAILED" });
+    console.error("❌ save commande failed:", e);
+    res.status(500).json({ error: "SAVE_FAILED" });
   }
-});
-
-app.post("/api/pin/login", async (req, res) => {
-  const { pin } = req.body || {};
-  const pinStr = String(pin || "").trim();
-  if (!/^\d{4}$/.test(pinStr)) return res.status(400).json({ error: "PIN_MUST_BE_4_DIGITS" });
-
-  const data = loadData();
-  const ids = Object.keys(data.pins || {});
-  if (ids.length === 0) return res.status(400).json({ error: "NO_PIN_SET" });
-
-  let matchedPinId = null;
-  for (const id of ids) {
-    const ok = await bcrypt.compare(pinStr, data.pins[id].hash);
-    if (ok) { matchedPinId = id; break; }
-  }
-  if (!matchedPinId) return res.status(401).json({ error: "BAD_PIN" });
-
-  const token = createSession(data, matchedPinId);
-
-  try {
-    saveData(data);
-    setSessionCookie(req, res, token);
-
-    // ✅ On renvoie AUSSI le token (fallback si cookies bloqués)
-    res.json({ success: true, loggedIn: true, token });
-  } catch (e) {
-    console.error("❌ login save failed:", e);
-    res.status(500).json({ error: "LOGIN_SAVE_FAILED" });
-  }
-});
-
-app.post("/api/pin/logout", (req, res) => {
-  const data = loadData();
-
-  const cookies = parseCookies(req);
-  const cookieToken = cookies[SESSION_COOKIE];
-  const bearer = getBearerToken(req);
-
-  const token = bearer || cookieToken;
-  if (token && data.sessions?.[token]) delete data.sessions[token];
-
-  try { saveData(data); } catch (e) { console.error("❌ logout save failed:", e); }
-
-  clearSessionCookie(req, res);
-  res.json({ success: true, loggedOut: true });
-});
-
-app.get("/api/pin/me", (req, res) => {
-  const data = loadData();
-  const sess = getSession(data, req);
-  res.json({ authenticated: !!sess });
 });
 
 // =====================================================
