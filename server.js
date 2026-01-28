@@ -16,7 +16,10 @@ const PORT = process.env.PORT || 3000;
 app.set("trust proxy", 1); // Render / proxy
 
 const DATA_FILE = path.join(__dirname, "commandes.json");
-const SERVICES = ["petitdej", "bar", "entretien"]; // scopes services
+const SERVICES = ["petitdej", "bar", "entretien"]; 
+function ensureService(service) {
+  return SERVICES.includes(service);
+}// scopes services
 const SCOPES = ["petitdej", "bar", "entretien", "recap", "admin"];
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8h
@@ -368,7 +371,35 @@ app.post("/api/commandes/:service", authMiddleware, (req, res) => {
     res.status(500).json({ error: "SAVE_FAILED" });
   }
 });
+// ---------- VALIDATION ----------
+// Permet de valider un service (petitdej / bar / entretien)
+// Autorisé : admin OU le scope du service OU recap (si tu veux que recap valide tout)
+app.post("/api/validate/:service", authMiddleware, (req, res) => {
+  const service = req.params.service;
+  if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
 
+  // scopes autorisés
+  const scope = req.user?.scope;
+  const allowed = (scope === "admin" || scope === "recap" || scope === service);
+  if (!allowed) return res.status(403).json({ error: "FORBIDDEN", scope, allowed: ["admin", "recap", service] });
+
+  const data = loadData();
+
+  // snapshot validé (tu peux l’exploiter dans recap)
+  data.validated = data.validated || {};
+  data.validated[service] = {
+    validatedAt: new Date().toISOString(),
+    payload: data[service] || null
+  };
+
+  try {
+    saveData(data);
+    res.json({ success: true, service, validatedAt: data.validated[service].validatedAt });
+  } catch (e) {
+    console.error("❌ validate failed:", e);
+    res.status(500).json({ error: "VALIDATE_FAILED" });
+  }
+});
 // =====================================================
 // 404 API + ERROR
 // =====================================================
