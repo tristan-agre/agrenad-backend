@@ -347,17 +347,39 @@ app.post("/api/validate/:service", authMiddleware, (req, res) => {
 
   const scope = req.user?.scope;
   if (scope !== "admin" && scope !== "recap" && scope !== service) {
-    return res.status(403).json({ error: "FORBIDDEN", scope, allowed: ["admin", "recap", service] });
+    return res.status(403).json({ error: "FORBIDDEN" });
   }
 
-  const data = loadData();
-  data.validated = data.validated || {};
-  data.validated[service] = {
-    validatedAt: new Date().toISOString(),
-    payload: data[service] || null,
-  };
-
   try {
+    const data = loadData();
+    data.validated = data.validated || {};
+
+    data.validated[service] = {
+      validatedAt: new Date().toISOString(),
+      payload: data[service] || null,
+    };
+
+    // ✅ Fusion automatique dans les courses
+    data.courses = data.courses || { donnees: {}, remarques: {}, updatedAt: null };
+    data.courses.donnees   = data.courses.donnees   || {};
+    data.courses.remarques = data.courses.remarques || {};
+
+    const donnees = data[service]?.donnees || {};
+    for (const [key, value] of Object.entries(donnees)) {
+      if (key === "remarques") {
+        // On stocke la remarque par service
+        const txt = String(value || "").trim();
+        if (txt) data.courses.remarques[service] = txt;
+        continue;
+      }
+      const existing = Number(data.courses.donnees[key] || 0);
+      const added    = Number(value) || 0;
+      if (added > 0) {
+        data.courses.donnees[key] = String(existing + added);
+      }
+    }
+    data.courses.updatedAt = new Date().toISOString();
+
     saveData(data);
     res.json({ success: true, service, validatedAt: data.validated[service].validatedAt });
   } catch (e) {
@@ -372,12 +394,32 @@ app.post("/api/validate", authMiddleware, requireScope("recap"), (req, res) => {
     const data = loadData();
     data.validated = data.validated || {};
     const now = new Date().toISOString();
+
+    // Reset courses avant fusion globale
+    data.courses = { donnees: {}, remarques: {}, updatedAt: now };
+
     for (const s of SERVICES) {
       data.validated[s] = {
         validatedAt: now,
         payload: data[s] || null,
       };
+
+      const donnees = data[s]?.donnees || {};
+      for (const [key, value] of Object.entries(donnees)) {
+        if (key === "remarques") {
+          const txt = String(value || "").trim();
+          if (txt) data.courses.remarques[s] = txt;
+          continue;
+        }
+        const existing = Number(data.courses.donnees[key] || 0);
+        const added    = Number(value) || 0;
+        if (added > 0) {
+          data.courses.donnees[key] = String(existing + added);
+        }
+      }
     }
+
+    data.courses.updatedAt = now;
     saveData(data);
     res.json({ ok: true, validatedAt: now });
   } catch (e) {
@@ -387,9 +429,28 @@ app.post("/api/validate", authMiddleware, requireScope("recap"), (req, res) => {
 });
 
 // ---------- COURSES ----------
-app.get("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
-  const data = loadData();
-  res.json(data.courses ?? { donnees: {}, updatedAt: null });
+app.post("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
+  try {
+    const body = req.body || {};
+    const remarques = (body.remarques && typeof body.remarques === "object")
+      ? body.remarques : {};
+
+    // On retire "remarques" avant de sanitizer les produits
+    const bodyProduits = { ...body };
+    delete bodyProduits.remarques;
+
+    const data = loadData();
+    data.courses = {
+      donnees:   sanitizeDonnees(bodyProduits),
+      remarques: remarques,
+      updatedAt: new Date().toISOString()
+    };
+    saveData(data);
+    res.json({ ok: true, updatedAt: data.courses.updatedAt });
+  } catch (e) {
+    console.error("❌ save courses failed:", e);
+    res.status(500).json({ error: "SAVE_FAILED" });
+  }
 });
 
 app.post("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
