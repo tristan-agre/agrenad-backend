@@ -13,26 +13,18 @@ const PORT = process.env.PORT || 3000;
 // =====================================================
 // CONFIG
 // =====================================================
-app.set("trust proxy", 1); // Render / proxy
+app.set("trust proxy", 1);
 
 const DATA_FILE = path.join(__dirname, "commandes.json");
-const SERVICES = ["petitdej", "bar", "entretien"]; 
-function ensureService(service) {
-  return SERVICES.includes(service);
-}// scopes services
+const SERVICES = ["petitdej", "bar", "entretien"];
 const SCOPES = ["petitdej", "bar", "entretien", "recap", "admin"];
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8h
 const SESSION_COOKIE = "agrenad_token";
 
-// IMPORTANT : mets un sel en env sur Render (et en local) : PIN_SALT
-// sinon fallback (OK en dev, moins bien en prod)
 const PIN_SALT = String(process.env.PIN_SALT || "CHANGE_ME_SALT").trim();
-
-// MASTER PIN en env (obligatoire en prod)
 const MASTER_PIN = String(process.env.MASTER_PIN || "9999").trim();
 
-// Front origins autorisés (Netlify + local)
 const FRONT_ORIGINS = [
   "http://localhost:5500",
   "http://127.0.0.1:5500",
@@ -49,7 +41,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // file:// / certains tests
+      if (!origin) return cb(null, true);
       if (FRONT_ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
@@ -60,7 +52,6 @@ app.use(
 app.options("*", cors());
 app.disable("etag");
 
-// no-cache API (optionnel mais propre)
 app.use("/api", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   next();
@@ -74,12 +65,9 @@ function defaultData() {
     petitdej: null,
     bar: null,
     entretien: null,
+    courses: null,
     validated: null,
-    pins: {
-      // exemple :
-      // bar: { hash: "...", updatedAt: "..." }
-      // recap: { hash: "...", updatedAt: "..." }
-    },
+    pins: {},
   };
 }
 
@@ -91,11 +79,12 @@ function loadData() {
 
     const d = JSON.parse(raw);
     return {
-      petitdej: d.petitdej ?? null,
-      bar: d.bar ?? null,
+      petitdej:  d.petitdej  ?? null,
+      bar:       d.bar       ?? null,
       entretien: d.entretien ?? null,
+      courses:   d.courses   ?? null,
       validated: d.validated ?? null,
-      pins: d.pins ?? {},
+      pins:      d.pins      ?? {},
     };
   } catch (e) {
     console.error("❌ loadData failed:", e);
@@ -114,21 +103,16 @@ function ensureService(service) {
 function sanitizeDonnees(obj) {
   const out = {};
   if (!obj || typeof obj !== "object") return out;
-
   for (const [key, value] of Object.entries(obj)) {
     if (value === null || value === undefined) continue;
-    const v = String(value).trim();
-    // on garde tout, y compris "0"
-    out[key] = v;
+    out[key] = String(value).trim();
   }
   return out;
 }
 
 // =====================================================
-// AUTH - PIN HASH + SESSIONS (mémoire)
+// AUTH
 // =====================================================
-
-// Sessions en mémoire : token -> { scope, expiresAt }
 const sessions = new Map();
 
 function isHttpsRequest(req) {
@@ -158,13 +142,9 @@ function setSessionCookie(req, res, token) {
   const https = isHttpsRequest(req);
   const sameSite = https ? "None" : "Lax";
   const securePart = https ? " Secure;" : "";
-
-  // cookie simple, HttpOnly, 8h
   res.setHeader(
     "Set-Cookie",
-    `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=${sameSite};${securePart} Max-Age=${Math.floor(
-      SESSION_TTL_MS / 1000
-    )}`
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=${sameSite};${securePart} Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`
   );
 }
 
@@ -172,7 +152,6 @@ function clearSessionCookie(req, res) {
   const https = isHttpsRequest(req);
   const sameSite = https ? "None" : "Lax";
   const securePart = https ? " Secure;" : "";
-
   res.setHeader(
     "Set-Cookie",
     `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=${sameSite};${securePart} Max-Age=0`
@@ -180,7 +159,6 @@ function clearSessionCookie(req, res) {
 }
 
 function hashPin(pin) {
-  // sha256(pin + salt)
   return crypto.createHash("sha256").update(`${pin}:${PIN_SALT}`).digest("hex");
 }
 
@@ -196,7 +174,6 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({ error: "SESSION_EXPIRED" });
   }
 
-  // sliding session
   sess.expiresAt = Date.now() + SESSION_TTL_MS;
   req.user = { scope: sess.scope, token };
   next();
@@ -206,10 +183,8 @@ function requireScope(...allowed) {
   return (req, res, next) => {
     const scope = req.user?.scope;
     if (!scope) return res.status(401).json({ error: "UNAUTHORIZED" });
-
     if (scope === "admin") return next();
     if (!allowed.includes(scope)) return res.status(403).json({ error: "FORBIDDEN", scope, allowed });
-
     next();
   };
 }
@@ -223,11 +198,10 @@ app.get("/api/hello", (req, res) => res.json({ ok: true, message: "hello" }));
 // ---------- AUTH ----------
 app.post("/api/auth/login", (req, res) => {
   const pin = String(req.body?.pin || "").trim();
-  const wantCookie = Boolean(req.body?.setCookie); // optionnel
+  const wantCookie = Boolean(req.body?.setCookie);
 
   if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: "PIN_INVALID" });
 
-  // MASTER PIN => admin
   if (pin === MASTER_PIN) {
     const token = createToken();
     sessions.set(token, { scope: "admin", expiresAt: Date.now() + SESSION_TTL_MS });
@@ -235,7 +209,6 @@ app.post("/api/auth/login", (req, res) => {
     return res.json({ ok: true, token, scope: "admin" });
   }
 
-  // sinon on check pins persistés
   const data = loadData();
   const pinHash = hashPin(pin);
 
@@ -266,10 +239,9 @@ app.post("/api/auth/logout", authMiddleware, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- ADMIN PIN MANAGEMENT (MASTER/admin only) ----------
+// ---------- ADMIN PIN MANAGEMENT ----------
 app.get("/api/admin/pins", authMiddleware, requireScope("admin"), (req, res) => {
   const data = loadData();
-  // On ne renvoie pas les hash en clair si tu veux, mais ici on peut renvoyer juste timestamps
   const out = {};
   for (const s of ["petitdej", "bar", "entretien", "recap"]) {
     out[s] = data.pins?.[s]?.updatedAt ? { updatedAt: data.pins[s].updatedAt } : null;
@@ -279,7 +251,7 @@ app.get("/api/admin/pins", authMiddleware, requireScope("admin"), (req, res) => 
 
 app.post("/api/admin/pins", authMiddleware, requireScope("admin"), (req, res) => {
   const scope = String(req.body?.scope || "").trim();
-  const pin = String(req.body?.pin || "").trim();
+  const pin   = String(req.body?.pin   || "").trim();
 
   if (!["petitdej", "bar", "entretien", "recap"].includes(scope)) {
     return res.status(400).json({ error: "SCOPE_INVALID" });
@@ -306,17 +278,15 @@ function getCommande(service) {
 function setCommande(service, body) {
   const donnees = sanitizeDonnees(body);
   const data = loadData();
-
   data[service] = {
     donnees,
     updatedAt: new Date().toISOString(),
   };
-
   saveData(data);
   return { success: true, service, updatedAt: data[service].updatedAt };
 }
 
-// GET /api/commandes/<service>
+// Routes dédiées par service
 for (const s of SERVICES) {
   app.get(`/api/commandes/${s}`, authMiddleware, requireScope(s, "recap"), (req, res) => {
     res.json(getCommande(s));
@@ -324,8 +294,7 @@ for (const s of SERVICES) {
 
   app.post(`/api/commandes/${s}`, authMiddleware, requireScope(s, "recap"), (req, res) => {
     try {
-      const out = setCommande(s, req.body);
-      res.json(out);
+      res.json(setCommande(s, req.body));
     } catch (e) {
       console.error("❌ save commande failed:", e);
       res.status(500).json({ error: "SAVE_FAILED" });
@@ -333,63 +302,59 @@ for (const s of SERVICES) {
   });
 }
 
-// recap : accès recap + admin
+// Route recap (toutes les commandes d'un coup)
 app.get("/api/commandes/recap", authMiddleware, requireScope("recap"), (req, res) => {
   const data = loadData();
   res.json({
-    petitdej: data.petitdej,
-    bar: data.bar,
+    petitdej:  data.petitdej,
+    bar:       data.bar,
     entretien: data.entretien,
   });
 });
 
-// ---------- COMPAT (ancienne route si tu en as encore besoin) ----------
+// Route compat globale
 app.get("/api/commandes", authMiddleware, requireScope("recap"), (req, res) => {
   const data = loadData();
   res.json({
-    petitdej: data.petitdej,
-    bar: data.bar,
+    petitdej:  data.petitdej,
+    bar:       data.bar,
     entretien: data.entretien,
   });
 });
 
+// Route générique POST (fallback)
 app.post("/api/commandes/:service", authMiddleware, (req, res) => {
   const service = req.params.service;
   if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
 
-  // scope service ou recap/admin
   const scope = req.user?.scope;
   if (scope !== "admin" && scope !== "recap" && scope !== service) {
     return res.status(403).json({ error: "FORBIDDEN" });
   }
 
   try {
-    const out = setCommande(service, req.body);
-    res.json(out);
+    res.json(setCommande(service, req.body));
   } catch (e) {
     console.error("❌ save commande failed:", e);
     res.status(500).json({ error: "SAVE_FAILED" });
   }
 });
-// ---------- VALIDATION ----------
-// Permet de valider un service (petitdej / bar / entretien)
-// Autorisé : admin OU le scope du service OU recap (si tu veux que recap valide tout)
+
+// ---------- VALIDATION PAR SERVICE ----------
 app.post("/api/validate/:service", authMiddleware, (req, res) => {
   const service = req.params.service;
   if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
 
-  // scopes autorisés
   const scope = req.user?.scope;
-  const allowed = (scope === "admin" || scope === "recap" || scope === service);
-  if (!allowed) return res.status(403).json({ error: "FORBIDDEN", scope, allowed: ["admin", "recap", service] });
+  if (scope !== "admin" && scope !== "recap" && scope !== service) {
+    return res.status(403).json({ error: "FORBIDDEN", scope, allowed: ["admin", "recap", service] });
+  }
 
   const data = loadData();
-
-  // snapshot validé (tu peux l’exploiter dans recap)
   data.validated = data.validated || {};
   data.validated[service] = {
     validatedAt: new Date().toISOString(),
-    payload: data[service] || null
+    payload: data[service] || null,
   };
 
   try {
@@ -400,8 +365,93 @@ app.post("/api/validate/:service", authMiddleware, (req, res) => {
     res.status(500).json({ error: "VALIDATE_FAILED" });
   }
 });
+
+// ---------- VALIDATION GLOBALE (tous les services) ----------
+app.post("/api/validate", authMiddleware, requireScope("recap"), (req, res) => {
+  try {
+    const data = loadData();
+    data.validated = data.validated || {};
+    const now = new Date().toISOString();
+    for (const s of SERVICES) {
+      data.validated[s] = {
+        validatedAt: now,
+        payload: data[s] || null,
+      };
+    }
+    saveData(data);
+    res.json({ ok: true, validatedAt: now });
+  } catch (e) {
+    console.error("❌ validate-all failed:", e);
+    res.status(500).json({ error: "VALIDATE_FAILED" });
+  }
+});
+
+// ---------- COURSES ----------
+app.get("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
+  const data = loadData();
+  res.json(data.courses ?? { donnees: {}, updatedAt: null });
+});
+
+app.post("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
+  try {
+    const data = loadData();
+    data.courses = {
+      donnees: sanitizeDonnees(req.body),
+      updatedAt: new Date().toISOString(),
+    };
+    saveData(data);
+    res.json({ ok: true, updatedAt: data.courses.updatedAt });
+  } catch (e) {
+    console.error("❌ save courses failed:", e);
+    res.status(500).json({ error: "SAVE_FAILED" });
+  }
+});
+
+app.post("/api/courses/validate", authMiddleware, requireScope("recap"), (req, res) => {
+  try {
+    const data = loadData();
+    data.courses = data.courses || { donnees: {}, updatedAt: null };
+    data.courses.validatedAt = new Date().toISOString();
+    saveData(data);
+    res.json({ ok: true, validatedAt: data.courses.validatedAt });
+  } catch (e) {
+    console.error("❌ validate courses failed:", e);
+    res.status(500).json({ error: "VALIDATE_FAILED" });
+  }
+});
+
+// ---------- RESET ALL ----------
+app.post("/api/reset-all", authMiddleware, requireScope("recap"), (req, res) => {
+  try {
+    const data = loadData();
+    data.petitdej  = null;
+    data.bar       = null;
+    data.entretien = null;
+    data.courses   = null;
+    data.validated = null;
+    saveData(data);
+    res.json({ ok: true, resetAt: new Date().toISOString() });
+  } catch (e) {
+    console.error("❌ reset-all failed:", e);
+    res.status(500).json({ error: "RESET_FAILED" });
+  }
+});
+
+// ---------- RESET RECAP (courses uniquement) ----------
+app.post("/api/recap/reset", authMiddleware, requireScope("recap"), (req, res) => {
+  try {
+    const data = loadData();
+    data.courses = null;
+    saveData(data);
+    res.json({ ok: true, resetAt: new Date().toISOString() });
+  } catch (e) {
+    console.error("❌ recap/reset failed:", e);
+    res.status(500).json({ error: "RESET_FAILED" });
+  }
+});
+
 // =====================================================
-// 404 API + ERROR
+// 404 API + ERROR — TOUJOURS EN DERNIER
 // =====================================================
 app.use("/api", (req, res) => res.status(404).json({ error: "API_NOT_FOUND" }));
 
