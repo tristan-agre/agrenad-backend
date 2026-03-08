@@ -19,10 +19,10 @@ const DATA_FILE = path.join(__dirname, "commandes.json");
 const SERVICES = ["petitdej", "bar", "entretien"];
 const SCOPES = ["petitdej", "bar", "entretien", "recap", "admin"];
 
-const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8h
+const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 const SESSION_COOKIE = "agrenad_token";
 
-const PIN_SALT = String(process.env.PIN_SALT || "CHANGE_ME_SALT").trim();
+const PIN_SALT   = String(process.env.PIN_SALT   || "CHANGE_ME_SALT").trim();
 const MASTER_PIN = String(process.env.MASTER_PIN || "9999").trim();
 
 const FRONT_ORIGINS = [
@@ -38,16 +38,14 @@ const FRONT_ORIGINS = [
 // =====================================================
 app.use(express.json({ limit: "1mb" }));
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (FRONT_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    credentials: true,
-  })
-);
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (FRONT_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true,
+}));
 
 app.options("*", cors());
 app.disable("etag");
@@ -62,12 +60,12 @@ app.use("/api", (req, res, next) => {
 // =====================================================
 function defaultData() {
   return {
-    petitdej: null,
-    bar: null,
+    petitdej:  null,
+    bar:       null,
     entretien: null,
-    courses: null,
+    courses:   null,
     validated: null,
-    pins: {},
+    pins:      {},
   };
 }
 
@@ -76,7 +74,6 @@ function loadData() {
     if (!fs.existsSync(DATA_FILE)) return defaultData();
     const raw = fs.readFileSync(DATA_FILE, "utf8");
     if (!raw || raw.trim() === "") return defaultData();
-
     const d = JSON.parse(raw);
     return {
       petitdej:  d.petitdej  ?? null,
@@ -140,20 +137,18 @@ function getCookieToken(req) {
 
 function setSessionCookie(req, res, token) {
   const https = isHttpsRequest(req);
-  const sameSite = https ? "None" : "Lax";
+  const sameSite  = https ? "None" : "Lax";
   const securePart = https ? " Secure;" : "";
-  res.setHeader(
-    "Set-Cookie",
+  res.setHeader("Set-Cookie",
     `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=${sameSite};${securePart} Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`
   );
 }
 
 function clearSessionCookie(req, res) {
   const https = isHttpsRequest(req);
-  const sameSite = https ? "None" : "Lax";
+  const sameSite  = https ? "None" : "Lax";
   const securePart = https ? " Secure;" : "";
-  res.setHeader(
-    "Set-Cookie",
+  res.setHeader("Set-Cookie",
     `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=${sameSite};${securePart} Max-Age=0`
   );
 }
@@ -192,12 +187,12 @@ function requireScope(...allowed) {
 // =====================================================
 // ROUTES
 // =====================================================
-app.get("/", (req, res) => res.send("AGRENAD backend OK"));
+app.get("/",          (req, res) => res.send("AGRENAD backend OK"));
 app.get("/api/hello", (req, res) => res.json({ ok: true, message: "hello" }));
 
 // ---------- AUTH ----------
 app.post("/api/auth/login", (req, res) => {
-  const pin = String(req.body?.pin || "").trim();
+  const pin        = String(req.body?.pin || "").trim();
   const wantCookie = Boolean(req.body?.setCookie);
 
   if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: "PIN_INVALID" });
@@ -209,14 +204,13 @@ app.post("/api/auth/login", (req, res) => {
     return res.json({ ok: true, token, scope: "admin" });
   }
 
-  const data = loadData();
+  const data    = loadData();
   const pinHash = hashPin(pin);
 
   let scope = null;
   for (const s of ["petitdej", "bar", "entretien", "recap"]) {
     if (data.pins?.[s]?.hash && data.pins[s].hash === pinHash) {
-      scope = s;
-      break;
+      scope = s; break;
     }
   }
 
@@ -225,7 +219,6 @@ app.post("/api/auth/login", (req, res) => {
   const token = createToken();
   sessions.set(token, { scope, expiresAt: Date.now() + SESSION_TTL_MS });
   if (wantCookie) setSessionCookie(req, res, token);
-
   res.json({ ok: true, token, scope });
 });
 
@@ -242,7 +235,7 @@ app.post("/api/auth/logout", authMiddleware, (req, res) => {
 // ---------- ADMIN PIN MANAGEMENT ----------
 app.get("/api/admin/pins", authMiddleware, requireScope("admin"), (req, res) => {
   const data = loadData();
-  const out = {};
+  const out  = {};
   for (const s of ["petitdej", "bar", "entretien", "recap"]) {
     out[s] = data.pins?.[s]?.updatedAt ? { updatedAt: data.pins[s].updatedAt } : null;
   }
@@ -253,23 +246,20 @@ app.post("/api/admin/pins", authMiddleware, requireScope("admin"), (req, res) =>
   const scope = String(req.body?.scope || "").trim();
   const pin   = String(req.body?.pin   || "").trim();
 
-  if (!["petitdej", "bar", "entretien", "recap"].includes(scope)) {
+  if (!["petitdej", "bar", "entretien", "recap"].includes(scope))
     return res.status(400).json({ error: "SCOPE_INVALID" });
-  }
-  if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: "PIN_INVALID" });
+  if (!/^\d{4}$/.test(pin))
+    return res.status(400).json({ error: "PIN_INVALID" });
 
   const data = loadData();
-  data.pins = data.pins || {};
-  data.pins[scope] = {
-    hash: hashPin(pin),
-    updatedAt: new Date().toISOString(),
-  };
+  data.pins  = data.pins || {};
+  data.pins[scope] = { hash: hashPin(pin), updatedAt: new Date().toISOString() };
 
   saveData(data);
   res.json({ ok: true, scope, updatedAt: data.pins[scope].updatedAt });
 });
 
-// ---------- COMMANDES (routes dédiées par service) ----------
+// ---------- COMMANDES ----------
 function getCommande(service) {
   const data = loadData();
   return data[service] ?? null;
@@ -277,11 +267,8 @@ function getCommande(service) {
 
 function setCommande(service, body) {
   const donnees = sanitizeDonnees(body);
-  const data = loadData();
-  data[service] = {
-    donnees,
-    updatedAt: new Date().toISOString(),
-  };
+  const data    = loadData();
+  data[service] = { donnees, updatedAt: new Date().toISOString() };
   saveData(data);
   return { success: true, service, updatedAt: data[service].updatedAt };
 }
@@ -291,53 +278,35 @@ for (const s of SERVICES) {
   app.get(`/api/commandes/${s}`, authMiddleware, requireScope(s, "recap"), (req, res) => {
     res.json(getCommande(s));
   });
-
   app.post(`/api/commandes/${s}`, authMiddleware, requireScope(s, "recap"), (req, res) => {
-    try {
-      res.json(setCommande(s, req.body));
-    } catch (e) {
-      console.error("❌ save commande failed:", e);
-      res.status(500).json({ error: "SAVE_FAILED" });
-    }
+    try   { res.json(setCommande(s, req.body)); }
+    catch (e) { console.error("❌ save commande failed:", e); res.status(500).json({ error: "SAVE_FAILED" }); }
   });
 }
 
-// Route recap (toutes les commandes d'un coup)
+// Route recap
 app.get("/api/commandes/recap", authMiddleware, requireScope("recap"), (req, res) => {
   const data = loadData();
-  res.json({
-    petitdej:  data.petitdej,
-    bar:       data.bar,
-    entretien: data.entretien,
-  });
+  res.json({ petitdej: data.petitdej, bar: data.bar, entretien: data.entretien });
 });
 
 // Route compat globale
 app.get("/api/commandes", authMiddleware, requireScope("recap"), (req, res) => {
   const data = loadData();
-  res.json({
-    petitdej:  data.petitdej,
-    bar:       data.bar,
-    entretien: data.entretien,
-  });
+  res.json({ petitdej: data.petitdej, bar: data.bar, entretien: data.entretien });
 });
 
-// Route générique POST (fallback)
+// Route générique POST fallback
 app.post("/api/commandes/:service", authMiddleware, (req, res) => {
   const service = req.params.service;
   if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
 
   const scope = req.user?.scope;
-  if (scope !== "admin" && scope !== "recap" && scope !== service) {
+  if (scope !== "admin" && scope !== "recap" && scope !== service)
     return res.status(403).json({ error: "FORBIDDEN" });
-  }
 
-  try {
-    res.json(setCommande(service, req.body));
-  } catch (e) {
-    console.error("❌ save commande failed:", e);
-    res.status(500).json({ error: "SAVE_FAILED" });
-  }
+  try   { res.json(setCommande(service, req.body)); }
+  catch (e) { console.error("❌ save commande failed:", e); res.status(500).json({ error: "SAVE_FAILED" }); }
 });
 
 // ---------- VALIDATION PAR SERVICE ----------
@@ -346,37 +315,32 @@ app.post("/api/validate/:service", authMiddleware, (req, res) => {
   if (!ensureService(service)) return res.status(400).json({ error: "Service inconnu" });
 
   const scope = req.user?.scope;
-  if (scope !== "admin" && scope !== "recap" && scope !== service) {
+  if (scope !== "admin" && scope !== "recap" && scope !== service)
     return res.status(403).json({ error: "FORBIDDEN" });
-  }
 
   try {
     const data = loadData();
     data.validated = data.validated || {};
-
     data.validated[service] = {
       validatedAt: new Date().toISOString(),
       payload: data[service] || null,
     };
 
-    // ✅ Fusion automatique dans les courses
-    data.courses = data.courses || { donnees: {}, remarques: {}, updatedAt: null };
+    // Fusion dans les courses
+    data.courses           = data.courses           || { donnees: {}, remarques: {}, updatedAt: null };
     data.courses.donnees   = data.courses.donnees   || {};
     data.courses.remarques = data.courses.remarques || {};
 
     const donnees = data[service]?.donnees || {};
     for (const [key, value] of Object.entries(donnees)) {
       if (key === "remarques") {
-        // On stocke la remarque par service
         const txt = String(value || "").trim();
         if (txt) data.courses.remarques[service] = txt;
         continue;
       }
       const existing = Number(data.courses.donnees[key] || 0);
       const added    = Number(value) || 0;
-      if (added > 0) {
-        data.courses.donnees[key] = String(existing + added);
-      }
+      if (added > 0) data.courses.donnees[key] = String(existing + added);
     }
     data.courses.updatedAt = new Date().toISOString();
 
@@ -388,7 +352,7 @@ app.post("/api/validate/:service", authMiddleware, (req, res) => {
   }
 });
 
-// ---------- VALIDATION GLOBALE (tous les services) ----------
+// ---------- VALIDATION GLOBALE ----------
 app.post("/api/validate", authMiddleware, requireScope("recap"), (req, res) => {
   try {
     const data = loadData();
@@ -399,10 +363,7 @@ app.post("/api/validate", authMiddleware, requireScope("recap"), (req, res) => {
     data.courses = { donnees: {}, remarques: {}, updatedAt: now };
 
     for (const s of SERVICES) {
-      data.validated[s] = {
-        validatedAt: now,
-        payload: data[s] || null,
-      };
+      data.validated[s] = { validatedAt: now, payload: data[s] || null };
 
       const donnees = data[s]?.donnees || {};
       for (const [key, value] of Object.entries(donnees)) {
@@ -413,9 +374,7 @@ app.post("/api/validate", authMiddleware, requireScope("recap"), (req, res) => {
         }
         const existing = Number(data.courses.donnees[key] || 0);
         const added    = Number(value) || 0;
-        if (added > 0) {
-          data.courses.donnees[key] = String(existing + added);
-        }
+        if (added > 0) data.courses.donnees[key] = String(existing + added);
       }
     }
 
@@ -429,35 +388,26 @@ app.post("/api/validate", authMiddleware, requireScope("recap"), (req, res) => {
 });
 
 // ---------- COURSES ----------
+// ✅ GET — chargement de la liste de courses
+app.get("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
+  const data = loadData();
+  res.json(data.courses ?? { donnees: {}, remarques: {}, updatedAt: null });
+});
+
+// ✅ POST — sauvegarde manuelle depuis courses.html
 app.post("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
   try {
-    const body = req.body || {};
+    const body      = req.body || {};
     const remarques = (body.remarques && typeof body.remarques === "object")
       ? body.remarques : {};
 
-    // On retire "remarques" avant de sanitizer les produits
     const bodyProduits = { ...body };
     delete bodyProduits.remarques;
 
-    const data = loadData();
-    data.courses = {
+    const data    = loadData();
+    data.courses  = {
       donnees:   sanitizeDonnees(bodyProduits),
       remarques: remarques,
-      updatedAt: new Date().toISOString()
-    };
-    saveData(data);
-    res.json({ ok: true, updatedAt: data.courses.updatedAt });
-  } catch (e) {
-    console.error("❌ save courses failed:", e);
-    res.status(500).json({ error: "SAVE_FAILED" });
-  }
-});
-
-app.post("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
-  try {
-    const data = loadData();
-    data.courses = {
-      donnees: sanitizeDonnees(req.body),
       updatedAt: new Date().toISOString(),
     };
     saveData(data);
@@ -468,10 +418,11 @@ app.post("/api/courses", authMiddleware, requireScope("recap"), (req, res) => {
   }
 });
 
+// ✅ POST — validation des courses (courses achetées)
 app.post("/api/courses/validate", authMiddleware, requireScope("recap"), (req, res) => {
   try {
     const data = loadData();
-    data.courses = data.courses || { donnees: {}, updatedAt: null };
+    data.courses = data.courses || { donnees: {}, remarques: {}, updatedAt: null };
     data.courses.validatedAt = new Date().toISOString();
     saveData(data);
     res.json({ ok: true, validatedAt: data.courses.validatedAt });
@@ -484,7 +435,7 @@ app.post("/api/courses/validate", authMiddleware, requireScope("recap"), (req, r
 // ---------- RESET ALL ----------
 app.post("/api/reset-all", authMiddleware, requireScope("recap"), (req, res) => {
   try {
-    const data = loadData();
+    const data     = loadData();
     data.petitdej  = null;
     data.bar       = null;
     data.entretien = null;
@@ -501,7 +452,7 @@ app.post("/api/reset-all", authMiddleware, requireScope("recap"), (req, res) => 
 // ---------- RESET RECAP (courses uniquement) ----------
 app.post("/api/recap/reset", authMiddleware, requireScope("recap"), (req, res) => {
   try {
-    const data = loadData();
+    const data   = loadData();
     data.courses = null;
     saveData(data);
     res.json({ ok: true, resetAt: new Date().toISOString() });
